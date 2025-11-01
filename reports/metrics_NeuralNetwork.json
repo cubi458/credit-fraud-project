@@ -1,0 +1,7 @@
+{
+  "precision": 0.6890756302521008,
+  "recall": 0.8367346938775511,
+  "f1": 0.7557603686635944,
+  "auc": 0.970648909535677,
+  "model_path": "models\\NeuralNetwork.joblib"
+}

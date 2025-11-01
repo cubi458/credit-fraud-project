@@ -1,40 +1,70 @@
-# eval.py
-import pickle
+"""
+Đánh giá mô hình: in Precision/Recall/F1/AUC và vẽ ROC cho tất cả model đã lưu
+"""
+
+import os
+import json
+import joblib
 import pandas as pd
-from sklearn.metrics import classification_report, roc_curve, auc
 import matplotlib.pyplot as plt
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+)
+from preprocess import load_data, split_data
 
-# Đọc dữ liệu
-data = pd.read_csv("data/creditcard.csv")
-X = data.drop("Class", axis=1)
-y = data["Class"]
 
-# Chia lại test set (giống train.py)
-from sklearn.model_selection import train_test_split
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+def evaluate_all(models_dir: str = "models", data_path: str = "data/creditcard.csv"):
+    df = load_data(data_path)
+    X_train, X_test, y_train, y_test = split_data(df, test_size=0.2, random_state=42, drop_time=False)
 
-# Load mô hình
-with open("best_model.pkl", "rb") as f:
-    model = pickle.load(f)
+    # Tìm tất cả các mô hình .joblib trong thư mục models
+    model_files = [f for f in os.listdir(models_dir) if f.endswith(".joblib")]
+    if not model_files:
+        raise FileNotFoundError("Không tìm thấy mô hình nào trong thư mục models/. Hãy chạy train.py trước.")
 
-# Dự đoán
-y_pred = model.predict(X_test)
-y_score = model.predict_proba(X_test)[:, 1]
+    os.makedirs("reports", exist_ok=True)
 
-# Báo cáo đánh giá
-print("🔍 Classification Report:")
-print(classification_report(y_test, y_pred, digits=4))
+    plt.figure(figsize=(7, 7))
+    metrics_out = {}
 
-# Vẽ ROC curve
-fpr, tpr, _ = roc_curve(y_test, y_score)
-roc_auc = auc(fpr, tpr)
+    for mf in sorted(model_files):
+        name = os.path.splitext(mf)[0]
+        model = joblib.load(os.path.join(models_dir, mf))
 
-plt.figure(figsize=(6, 6))
-plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.4f})')
-plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.title('ROC Curve')
-plt.legend()
-plt.grid()
-plt.show()
+        y_prob = model.predict_proba(X_test)[:, 1]
+        y_pred = (y_prob >= 0.5).astype(int)
+
+        prec = precision_score(y_test, y_pred, zero_division=0)
+        rec = recall_score(y_test, y_pred, zero_division=0)
+        f1 = f1_score(y_test, y_pred, zero_division=0)
+        auc = roc_auc_score(y_test, y_prob)
+
+        fpr, tpr, _ = roc_curve(y_test, y_prob)
+        plt.plot(fpr, tpr, label=f"{name} (AUC={auc:.4f})")
+
+        metrics_out[name] = {"precision": prec, "recall": rec, "f1": f1, "auc": auc}
+        print(f"\n🔍 {name}:")
+        print(f"  Precision={prec:.4f} | Recall={rec:.4f} | F1={f1:.4f} | AUC={auc:.4f}")
+
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves")
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    out_path = os.path.join("reports", "roc_curves.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"\n🖼️ Lưu ROC Curves vào {out_path}")
+
+    # Lưu tổng hợp metric
+    with open(os.path.join("reports", "evaluation_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics_out, f, ensure_ascii=False, indent=2)
+    print("💾 Lưu metrics vào reports/evaluation_summary.json")
+
+
+if __name__ == "__main__":
+    evaluate_all()
