@@ -7,7 +7,6 @@ Huấn luyện các mô hình chính thống cho Credit Card Fraud Detection:
 
 import os
 import json
-import copy
 import joblib
 import numpy as np
 import pandas as pd
@@ -22,6 +21,12 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
 from preprocess import load_data, split_data, get_preprocessor
+
+
+def resolve_torch_device() -> torch.device:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"🖥️ PyTorch device: {device}")
+    return device
 
 
 def train_all_models(
@@ -224,6 +229,7 @@ def train_resnet18_model(
     batch_size=2048,
     lr=1e-3,
     patience=4,
+    device=None,
 ):
     torch.manual_seed(random_state)
     np.random.seed(random_state)
@@ -235,8 +241,12 @@ def train_resnet18_model(
     y_train_np = y_train.to_numpy() if hasattr(y_train, "to_numpy") else np.asarray(y_train)
     y_test_np = y_test.to_numpy() if hasattr(y_test, "to_numpy") else np.asarray(y_test)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device is None:
+        device = resolve_torch_device()
+    else:
+        print(f"🖥️ PyTorch device (override): {device}")
     model = build_resnet18(grid_shape=grid_shape, device=device)
+    print(f"🔌 ResNet18 parameters on {next(model.parameters()).device}")
 
     train_dataset = TabularResNetDataset(X_train_proc, y_train_np, grid_shape=grid_shape)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
@@ -254,12 +264,12 @@ def train_resnet18_model(
 
     for epoch in range(epochs):
         model.train()
-        for batch_X, batch_y in train_loader:
-            batch_X = batch_X.to(device)
-            batch_y = batch_y.to(device)
+        for inputs, labels in train_loader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             optimizer.zero_grad()
-            logits = model(batch_X).squeeze(1)
-            loss = criterion(logits, batch_y)
+            logits = model(inputs).squeeze(1)
+            loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
 
@@ -278,7 +288,7 @@ def train_resnet18_model(
 
         if auc > best_auc:
             best_auc = auc
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_metrics = {
                 "precision": prec,
                 "recall": rec,
@@ -293,7 +303,7 @@ def train_resnet18_model(
                 break
 
     if best_state is None:
-        best_state = model.state_dict()
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     if best_metrics is None:
         best_metrics = {
             "precision": prec,

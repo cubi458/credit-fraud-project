@@ -1,2 +1,18 @@
 # Bỏ qua dataset nặng
 *.csv
+
+# Bỏ thư viện/venv khỏi Git
+.venv/
+venv/
+env/
+Scripts/
+
+# Artefact Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs và tạm
+*.log
+*.tmp
+*.bak
