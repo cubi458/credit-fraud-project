@@ -1,20 +1,26 @@
 """
-Train các mô hình (Logistic Regression, Random Forest, Neural Network) với xử lý mất cân bằng
-- LR, RF dùng class_weight='balanced'
-- MLP dùng SMOTE trong pipeline
-- Toàn bộ pipeline gồm bước tiền xử lý từ preprocess.get_preprocessor
+Huấn luyện các mô hình chính thống cho Credit Card Fraud Detection:
+- Logistic Regression, Random Forest, SVM (sklearn pipelines với ColumnTransformer)
+- ResNet18 fine-tune bằng PyTorch trên dữ liệu tabular reshape thành grid
+- Tự động chọn mô hình tốt nhất theo AUC và lưu báo cáo tương ứng
 """
 
 import os
 import json
+import copy
 import joblib
+import numpy as np
 import pandas as pd
 from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
+from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.svm import SVC
+import torch
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models
 from preprocess import load_data, split_data, get_preprocessor
 
 
@@ -32,13 +38,12 @@ def train_all_models(
         df, test_size=test_size, random_state=random_state, drop_time=False
     )
 
-    preprocessor = get_preprocessor(drop_time=drop_time_in_preprocess)
+    base_preprocessor = get_preprocessor(drop_time=drop_time_in_preprocess)
 
     models = {
-        # Class weight xử lý lệch lớp, solver liblinear ổn cho dữ liệu không quá lớn
         "LogisticRegression": ImbPipeline(
             steps=[
-                ("preprocess", preprocessor),
+                ("preprocess", clone(base_preprocessor)),
                 (
                     "clf",
                     LogisticRegression(
@@ -47,10 +52,9 @@ def train_all_models(
                 ),
             ]
         ),
-        # RF hỗ trợ class_weight, tận dụng n_jobs=-1
         "RandomForest": ImbPipeline(
             steps=[
-                ("preprocess", preprocessor),
+                ("preprocess", clone(base_preprocessor)),
                 (
                     "clf",
                     RandomForestClassifier(
@@ -62,21 +66,18 @@ def train_all_models(
                 ),
             ]
         ),
-        # MLP không hỗ trợ class_weight tốt -> dùng SMOTE ở bước fit
-        "NeuralNetwork": ImbPipeline(
+        "SVM": ImbPipeline(
             steps=[
-                ("preprocess", preprocessor),
-                ("smote", SMOTE(random_state=random_state)),
+                ("preprocess", clone(base_preprocessor)),
                 (
                     "clf",
-                    MLPClassifier(
-                        hidden_layer_sizes=(64, 32),
-                        activation="relu",
-                        learning_rate_init=1e-3,
-                        alpha=1e-4,
-                        early_stopping=True,
-                        max_iter=100,
+                    SVC(
+                        kernel="rbf",
+                        class_weight="balanced",
+                        probability=True,
                         random_state=random_state,
+                        C=1.0,
+                        gamma="scale",
                     ),
                 ),
             ]
@@ -122,6 +123,22 @@ def train_all_models(
             best_name = name
             best_path = model_path
 
+    resnet_preprocessor = clone(base_preprocessor)
+    resnet_metrics, resnet_model_path = train_resnet18_model(
+        X_train,
+        X_test,
+        y_train,
+        y_test,
+        resnet_preprocessor,
+        random_state=random_state,
+    )
+    metrics_summary["ResNet18"] = resnet_metrics
+
+    if resnet_metrics["auc"] > best_auc:
+        best_auc = resnet_metrics["auc"]
+        best_name = "ResNet18"
+        best_path = resnet_model_path
+
     # Lưu best model info
     best_info = {"best_model": best_name, "auc": best_auc, "path": best_path}
     with open(os.path.join("models", "best_model.json"), "w", encoding="utf-8") as f:
@@ -130,6 +147,170 @@ def train_all_models(
     print(f"\n✅ Best model: {best_name} (AUC={best_auc:.4f})")
     print(f"💾 Saved models to models/ and metrics to reports/")
     return metrics_summary, best_info
+
+
+def reshape_to_grid(features: np.ndarray, grid_shape=(6, 5)) -> np.ndarray:
+    """Map tabular features into a fixed 2D grid suitable for ResNet input."""
+    n_samples, n_features = features.shape
+    grid_h, grid_w = grid_shape
+    total_cells = grid_h * grid_w
+    if n_features > total_cells:
+        raise ValueError(
+            f"Số đặc trưng ({n_features}) lớn hơn số ô grid ({total_cells}). Tăng grid_shape."  # noqa: E501
+        )
+    padded = np.zeros((n_samples, total_cells), dtype=np.float32)
+    padded[:, :n_features] = features.astype(np.float32)
+    return padded.reshape(n_samples, 1, grid_h, grid_w)
+
+
+class TabularResNetDataset(Dataset):
+    def __init__(self, features: np.ndarray, labels: np.ndarray, grid_shape=(6, 5)):
+        self.X = torch.from_numpy(reshape_to_grid(features, grid_shape))
+        self.y = torch.from_numpy(labels.astype(np.float32))
+
+    def __len__(self):  # noqa: D401
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+def build_resnet18(grid_shape=(6, 5), device=None):
+    model = models.resnet18(weights=None)
+    model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+    model.fc = nn.Linear(model.fc.in_features, 1)
+    if device is not None:
+        model.to(device)
+    return model
+
+
+class ResNet18TabularClassifier:
+    def __init__(self, model_state_dict, preprocessor, grid_shape=(6, 5)):
+        self.device = torch.device("cpu")
+        self.model = build_resnet18(grid_shape=grid_shape, device=self.device)
+        self.model.load_state_dict(model_state_dict)
+        self.model.eval()
+        self.preprocessor = preprocessor
+        self.grid_shape = grid_shape
+        self.feature_names = list(getattr(preprocessor, "feature_names_in_", []))
+
+    def _ensure_frame(self, X):
+        if isinstance(X, pd.DataFrame):
+            return X
+        arr = np.asarray(X)
+        if self.feature_names:
+            return pd.DataFrame(arr, columns=self.feature_names)
+        return pd.DataFrame(arr)
+
+    def predict_proba(self, X):
+        frame = self._ensure_frame(X)
+        transformed = self.preprocessor.transform(frame)
+        grid = reshape_to_grid(transformed, self.grid_shape)
+        with torch.no_grad():
+            logits = self.model(torch.from_numpy(grid).to(self.device)).squeeze(1)
+            probs = torch.sigmoid(logits).cpu().numpy()
+        return np.vstack([1 - probs, probs]).T
+
+
+def train_resnet18_model(
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    preprocessor,
+    random_state=42,
+    grid_shape=(6, 5),
+    epochs=15,
+    batch_size=2048,
+    lr=1e-3,
+    patience=4,
+):
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    preprocessor.fit(X_train)
+    X_train_proc = preprocessor.transform(X_train)
+    X_test_proc = preprocessor.transform(X_test)
+
+    y_train_np = y_train.to_numpy() if hasattr(y_train, "to_numpy") else np.asarray(y_train)
+    y_test_np = y_test.to_numpy() if hasattr(y_test, "to_numpy") else np.asarray(y_test)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_resnet18(grid_shape=grid_shape, device=device)
+
+    train_dataset = TabularResNetDataset(X_train_proc, y_train_np, grid_shape=grid_shape)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    best_auc = -1.0
+    best_state = None
+    best_metrics = None
+    epochs_without_improve = 0
+
+    X_test_grid = reshape_to_grid(X_test_proc, grid_shape)
+    X_test_tensor = torch.from_numpy(X_test_grid).to(device)
+
+    for epoch in range(epochs):
+        model.train()
+        for batch_X, batch_y in train_loader:
+            batch_X = batch_X.to(device)
+            batch_y = batch_y.to(device)
+            optimizer.zero_grad()
+            logits = model(batch_X).squeeze(1)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            logits = model(X_test_tensor).squeeze(1)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            preds = (probs >= 0.5).astype(int)
+
+        auc = roc_auc_score(y_test_np, probs)
+        prec = precision_score(y_test_np, preds, zero_division=0)
+        rec = recall_score(y_test_np, preds, zero_division=0)
+        f1 = f1_score(y_test_np, preds, zero_division=0)
+
+        print(f"🟦 [Epoch {epoch+1}/{epochs}] ResNet18 -> Precision:{prec:.4f} Recall:{rec:.4f} F1:{f1:.4f} AUC:{auc:.4f}")
+
+        if auc > best_auc:
+            best_auc = auc
+            best_state = copy.deepcopy(model.state_dict())
+            best_metrics = {
+                "precision": prec,
+                "recall": rec,
+                "f1": f1,
+                "auc": auc,
+            }
+            epochs_without_improve = 0
+        else:
+            epochs_without_improve += 1
+            if epochs_without_improve >= patience:
+                print("⏹️ Early stopping ResNet18 do AUC không cải thiện.")
+                break
+
+    if best_state is None:
+        best_state = model.state_dict()
+    if best_metrics is None:
+        best_metrics = {
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "auc": auc,
+        }
+
+    artifact = ResNet18TabularClassifier(best_state, preprocessor, grid_shape=grid_shape)
+    model_path = os.path.join("models", "ResNet18.joblib")
+    joblib.dump(artifact, model_path)
+
+    metrics = {**best_metrics, "model_path": model_path}
+    with open(os.path.join("reports", "metrics_ResNet18.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+
+    return metrics, model_path
 
 
 if __name__ == "__main__":
