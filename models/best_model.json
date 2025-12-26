@@ -1,5 +1,5 @@
 {
-  "best_model": "LogisticRegression",
-  "auc": 0.9713857194537916,
-  "path": "models\\LogisticRegression.joblib"
+  "best_model": "SVM",
+  "auc": 0.9744257332927544,
+  "path": "models\\SVM.joblib"
 }
