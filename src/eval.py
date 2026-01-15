@@ -4,6 +4,7 @@
 
 import os
 import json
+import sys
 import joblib
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,6 +16,11 @@ from sklearn.metrics import (
     roc_curve,
 )
 from preprocess import load_data, split_data
+from train import ResNet18TabularClassifier
+
+
+# Đảm bảo joblib có thể tìm thấy class khi deserialize ResNet18 joblib (được pickled khi train.py chạy dưới __main__)
+sys.modules.setdefault("__main__", sys.modules[__name__]).ResNet18TabularClassifier = ResNet18TabularClassifier
 
 
 def evaluate_all(models_dir: str = "models", data_path: str = "data/creditcard.csv"):
@@ -59,6 +65,10 @@ def evaluate_all(models_dir: str = "models", data_path: str = "data/creditcard.c
     out_path = os.path.join("reports", "roc_curves.png")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"\n🖼️ Lưu ROC Curves vào {out_path}")
+    try:
+        plt.show(block=True)
+    except Exception as exc:
+        print(f"⚠️ Không thể hiển thị biểu đồ trực tiếp: {exc}")
 
     # Lưu tổng hợp metric
     with open(os.path.join("reports", "evaluation_summary.json"), "w", encoding="utf-8") as f:
