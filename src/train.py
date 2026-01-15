@@ -25,7 +25,14 @@ from preprocess import load_data, split_data, get_preprocessor
 
 def resolve_torch_device() -> torch.device:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️ PyTorch device: {device}")
+    if device.type == "cuda":
+        try:
+            name = torch.cuda.get_device_name(0)
+            print(f"🖥️ PyTorch device: {device} ({name})")
+        except Exception:
+            print(f"🖥️ PyTorch device: {device}")
+    else:
+        print(f"🖥️ PyTorch device: {device}")
     return device
 
 
